@@ -6,6 +6,9 @@ import logging
 from app.config import settings
 from app.routes import recipes, fridge
 from app.services.faiss_service import faiss_service
+from app.services.reranker_service import reranker_service
+from app.services.llm_service import llm_service
+from app.services.rag_pipeline import rag_pipeline
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -37,18 +40,22 @@ app.add_middleware(
 )
 
 
-# Startup event - Load FAISS index
+# Startup event - Initialize RAG Pipeline components
 @app.on_event("startup")
 async def startup_event():
     """
     Startup event handler
-    Loads FAISS index automatically when the application starts
+    Initializes RAG Pipeline components:
+    1. FAISS index (Retriever)
+    2. Reranker service (lazy load)
+    3. LLM service (lazy load)
+    4. RAG Pipeline (coordinates all components)
     """
     logger.info("🚀 Starting Smart Fridge Chef API...")
     
-    # Load FAISS index
+    # Step 1: Load FAISS index (Retriever)
     try:
-        logger.info("Loading FAISS index...")
+        logger.info("📦 Loading FAISS index (Retriever)...")
         success = faiss_service.load_index()
         
         if success:
@@ -65,9 +72,39 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Error loading FAISS index: {e}", exc_info=True)
         logger.warning("   Continuing with string matching fallback")
-        logger.warning("   Application will continue to run normally")
     
-    logger.info("✅ API startup completed")
+    # Step 2: Initialize Reranker (lazy load - will load on first use)
+    try:
+        if reranker_service.enabled:
+            logger.info("🔄 Reranker service initialized (will load on first use)")
+            logger.info(f"   Model: {reranker_service.model_name}")
+        else:
+            logger.info("⚠️  Reranker is disabled in config")
+    except Exception as e:
+        logger.warning(f"⚠️  Reranker initialization warning: {e}")
+    
+    # Step 3: Initialize LLM service (lazy load - will load on first use)
+    try:
+        if llm_service.enabled:
+            if llm_service.api_key:
+                logger.info("🤖 LLM service initialized (will load on first use)")
+                logger.info(f"   Model: {llm_service.model_name}")
+            else:
+                logger.warning("⚠️  GEMINI_API_KEY not found")
+                logger.warning("   LLM explanations will not be available")
+        else:
+            logger.info("⚠️  LLM service is disabled in config")
+    except Exception as e:
+        logger.warning(f"⚠️  LLM initialization warning: {e}")
+    
+    # Step 4: RAG Pipeline is already initialized (singleton)
+    logger.info("🔗 RAG Pipeline initialized")
+    logger.info("   Components:")
+    logger.info(f"      - Retriever (FAISS): {'✅' if faiss_service.is_loaded() else '❌'}")
+    logger.info(f"      - Reranker: {'✅' if reranker_service.enabled else '❌'}")
+    logger.info(f"      - Generator (LLM): {'✅' if (llm_service.enabled and llm_service.api_key) else '❌'}")
+    
+    logger.info("✅ API startup completed - RAG Pipeline ready")
 
 
 # Health check endpoint
@@ -75,11 +112,28 @@ async def startup_event():
 async def health_check():
     """
     Health check endpoint to verify the API is running
+    Includes RAG Pipeline component status
     """
     return {
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
-        "environment": settings.NODE_ENV
+        "environment": settings.NODE_ENV,
+        "rag_pipeline": {
+            "retriever": {
+                "available": faiss_service.is_loaded(),
+                "type": "FAISS"
+            },
+            "reranker": {
+                "available": reranker_service.enabled,
+                "loaded": reranker_service.is_loaded() if reranker_service.enabled else False,
+                "model": reranker_service.model_name if reranker_service.enabled else None
+            },
+            "generator": {
+                "available": llm_service.is_available(),
+                "model": llm_service.model_name if llm_service.enabled else None,
+                "has_api_key": bool(llm_service.api_key) if llm_service.enabled else False
+            }
+        }
     }
 
 

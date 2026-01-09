@@ -45,3 +45,40 @@ class RecipeSearchResponse(BaseModel):
     query: str
     search_method: str  # "vector" or "string_matching"
 
+
+class DietaryPreferences(BaseModel):
+    """Dietary preferences for RAG recommendations"""
+    vegan: Optional[bool] = False
+    vegetarian: Optional[bool] = False
+    glutenFree: Optional[bool] = False
+    dairyFree: Optional[bool] = False
+    nutAllergy: Optional[bool] = False
+
+
+class RAGRecommendRequest(BaseModel):
+    """Request model for RAG-based recommendations"""
+    ingredients: List[str]
+    preferences: Optional[DietaryPreferences] = None
+    excluded_ingredients: Optional[List[str]] = None
+    explain: Optional[bool] = True
+    top_k: Optional[int] = 10
+    retrieval_top_k: Optional[int] = 50
+
+
+class RAGMetadata(BaseModel):
+    """Metadata about RAG pipeline execution"""
+    retrieval_count: int
+    reranked_count: int
+    pipeline_stages: List[str]
+    retriever_used: bool
+    reranker_used: bool
+    llm_used: bool
+
+
+class RAGRecommendResponse(BaseModel):
+    """Response model for RAG-based recommendations"""
+    recipes: List[RecipeWithMatch]
+    explanation: Optional[str] = None
+    metadata: RAGMetadata
+    count: int
+

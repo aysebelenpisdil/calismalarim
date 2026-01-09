@@ -8,11 +8,15 @@ from app.models.recipe import (
     RecipeRecommendRequest,
     RecipeRecommendResponse,
     RecipeSearchRequest,
-    RecipeSearchResponse
+    RecipeSearchResponse,
+    RAGRecommendRequest,
+    RAGRecommendResponse,
+    DietaryPreferences
 )
 from app.services.recipe_service import recipe_service
 from app.services.faiss_service import faiss_service
 from app.services.embedding_service import embedding_service
+from app.services.rag_pipeline import rag_pipeline
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -207,4 +211,90 @@ async def search_recipes(request: RecipeSearchRequest):
     except Exception as e:
         logger.error(f"Error in text search: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to search recipes: {str(e)}")
+
+
+@router.post("/rag-recommend", response_model=RAGRecommendResponse)
+async def rag_recommend(request: RAGRecommendRequest):
+    """
+    RAG-based recipe recommendations with explanations
+    
+    Complete pipeline: Retrieve (FAISS) → Rerank (Cross-encoder) → Generate (Gemini LLM)
+    
+    Request body:
+    {
+        "ingredients": ["chicken", "pasta", "tomato"],
+        "preferences": {
+            "vegan": false,
+            "glutenFree": false,
+            "dairyFree": false
+        },
+        "excluded_ingredients": ["mushroom"],
+        "explain": true,
+        "top_k": 10,
+        "retrieval_top_k": 50
+    }
+    
+    Response includes:
+    - recipes: Top-k reranked recipes
+    - explanation: LLM-generated explanation (if explain=true)
+    - metadata: Pipeline execution details
+    """
+    start_time = time.time()
+    
+    try:
+        if not request.ingredients:
+            raise HTTPException(status_code=400, detail="Ingredients list is required")
+        
+        # Prepare preferences dict
+        preferences_dict = None
+        if request.preferences:
+            preferences_dict = {
+                "vegan": request.preferences.vegan or False,
+                "vegetarian": request.preferences.vegetarian or False,
+                "glutenFree": request.preferences.glutenFree or False,
+                "dairyFree": request.preferences.dairyFree or False,
+                "nutAllergy": request.preferences.nutAllergy or False
+            }
+        
+        top_k = request.top_k if request.top_k is not None else 10
+        retrieval_top_k = request.retrieval_top_k if request.retrieval_top_k is not None else 50
+        explain = request.explain if request.explain is not None else True
+        
+        logger.info(
+            f"RAG recommendation request: {len(request.ingredients)} ingredients, "
+            f"top_k={top_k}, explain={explain}"
+        )
+        
+        # Process through RAG pipeline
+        result = rag_pipeline.process(
+            user_ingredients=request.ingredients,
+            user_preferences=preferences_dict,
+            excluded_ingredients=request.excluded_ingredients or [],
+            top_k=top_k,
+            explain=explain,
+            retrieval_top_k=retrieval_top_k
+        )
+        
+        process_time = time.time() - start_time
+        logger.info(
+            f"RAG pipeline completed in {process_time:.3f}s: "
+            f"{len(result['recipes'])} recipes, "
+            f"explanation={'yes' if result['explanation'] else 'no'}"
+        )
+        
+        return RAGRecommendResponse(
+            recipes=result['recipes'],
+            explanation=result['explanation'],
+            metadata=result['metadata'],
+            count=len(result['recipes'])
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in RAG recommendation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate RAG recommendations: {str(e)}"
+        )
 

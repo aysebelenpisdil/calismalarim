@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useFridge } from '../store/FridgeContext';
 import { getRecipeImageUrl } from '../utils/helpers';
-import { getRecommendations, ApiError } from '../utils/api';
+import { getRecommendations, getRAGRecommendations, ApiError } from '../utils/api';
 import { Link } from 'react-router-dom';
 import { RecipeWithMatch } from '../types';
 import { filterRecipes, getActiveFilterLabels } from '../utils/recipeFilter';
@@ -14,6 +14,9 @@ const RecipesPage: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const [page, setPage] = useState(1);
     const [responseTime, setResponseTime] = useState<number | null>(null);
+    const [useRAG, setUseRAG] = useState(true); // RAG pipeline kullanımı (default: true)
+    const [ragExplanation, setRagExplanation] = useState<string | null>(null);
+    const [ragMetadata, setRagMetadata] = useState<any>(null);
     
     const RECIPES_PER_PAGE = 12;
 
@@ -22,32 +25,66 @@ const RecipesPage: React.FC = () => {
             setSuitableRecipes([]);
             setDisplayedRecipes([]);
             setPage(1);
+            setRagExplanation(null);
+            setRagMetadata(null);
             return;
         }
 
         setLoading(true);
         setError(null);
         setResponseTime(null);
+        setRagExplanation(null);
+        setRagMetadata(null);
 
         try {
             const startTime = performance.now();
-            const response = await getRecommendations(fridgeIngredients);
-            const endTime = performance.now();
             
-            setResponseTime(Math.round(endTime - startTime));
-            const allRecipes = response.recommendations || [];
+            if (useRAG) {
+                // RAG Pipeline: Retrieve → Rerank → Generate
+                const ragResponse = await getRAGRecommendations({
+                    ingredients: fridgeIngredients,
+                    preferences: dietaryPreferences,
+                    excluded_ingredients: excludedIngredients,
+                    explain: true,
+                    top_k: 50, // Get more recipes for pagination
+                    retrieval_top_k: 100
+                });
+                
+                const endTime = performance.now();
+                setResponseTime(Math.round(endTime - startTime));
+                
+                // RAG response already includes filtered recipes
+                const allRecipes = ragResponse.recipes || [];
+                
+                // Store explanation and metadata
+                setRagExplanation(ragResponse.explanation || null);
+                setRagMetadata(ragResponse.metadata || null);
+                
+                setSuitableRecipes(allRecipes);
+                setDisplayedRecipes(allRecipes.slice(0, RECIPES_PER_PAGE));
+            } else {
+                // Traditional recommendation endpoint
+                const response = await getRecommendations(fridgeIngredients);
+                const endTime = performance.now();
+                
+                setResponseTime(Math.round(endTime - startTime));
+                const allRecipes = response.recommendations || [];
+                
+                // Apply filters
+                const filteredRecipes = filterRecipes(allRecipes, dietaryPreferences, excludedIngredients);
+                
+                setSuitableRecipes(filteredRecipes);
+                setDisplayedRecipes(filteredRecipes.slice(0, RECIPES_PER_PAGE));
+            }
             
-            // Apply filters
-            const filteredRecipes = filterRecipes(allRecipes, dietaryPreferences, excludedIngredients);
-            
-            setSuitableRecipes(filteredRecipes);
-            setDisplayedRecipes(filteredRecipes.slice(0, RECIPES_PER_PAGE));
             setPage(1);
         } catch (err) {
             const apiError = err as ApiError;
             setError(apiError.message);
             setSuitableRecipes([]);
             setDisplayedRecipes([]);
+            setRagExplanation(null);
+            setRagMetadata(null);
         } finally {
             setLoading(false);
         }
@@ -68,14 +105,29 @@ const RecipesPage: React.FC = () => {
 
     useEffect(() => {
         fetchRecipes();
-    }, [fridgeIngredients, dietaryPreferences, excludedIngredients]);
+    }, [fridgeIngredients, dietaryPreferences, excludedIngredients, useRAG]);
 
     return (
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <div className="mb-8">
                 <div className="flex items-center justify-between">
                     <div>
-                        <h1 className="text-3xl font-bold text-gray-900">Recommended Recipes</h1>
+                        <div className="flex items-center gap-4">
+                            <h1 className="text-3xl font-bold text-gray-900">Recommended Recipes</h1>
+                            {/* RAG Toggle */}
+                            <label className="relative inline-flex items-center cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={useRAG}
+                                    onChange={(e) => setUseRAG(e.target.checked)}
+                                    className="sr-only peer"
+                                />
+                                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+                                <span className="ml-3 text-sm font-medium text-gray-700">
+                                    {useRAG ? '🤖 RAG Pipeline' : '🔍 Standard Search'}
+                                </span>
+                            </label>
+                        </div>
                         <p className="mt-2 text-gray-600">
                             Based on your fridge content: <span className="italic">{fridgeIngredients.join(', ') || "Nothing yet"}</span>
                         </p>
@@ -92,6 +144,24 @@ const RecipesPage: React.FC = () => {
                                 ))}
                             </div>
                         )}
+                        {/* RAG Metadata */}
+                        {ragMetadata && useRAG && (
+                            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                                <span className="text-gray-500">Pipeline:</span>
+                                {ragMetadata.retriever_used && (
+                                    <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded">FAISS</span>
+                                )}
+                                {ragMetadata.reranker_used && (
+                                    <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded">Reranker</span>
+                                )}
+                                {ragMetadata.llm_used && (
+                                    <span className="px-2 py-1 bg-green-100 text-green-800 rounded">LLM</span>
+                                )}
+                                <span className="text-gray-500">
+                                    ({ragMetadata.retrieval_count} → {ragMetadata.reranked_count})
+                                </span>
+                            </div>
+                        )}
                     </div>
                     {responseTime && (
                         <div className="text-sm text-gray-500">
@@ -102,6 +172,24 @@ const RecipesPage: React.FC = () => {
                 {suitableRecipes.length > 0 && (
                     <div className="mt-3 text-sm text-gray-600">
                         Showing {displayedRecipes.length} of {suitableRecipes.length} recipes
+                    </div>
+                )}
+                {/* RAG Explanation */}
+                {ragExplanation && useRAG && (
+                    <div className="mt-4 bg-gradient-to-r from-blue-50 to-purple-50 border-l-4 border-primary rounded-lg p-4 shadow-sm">
+                        <div className="flex items-start">
+                            <div className="flex-shrink-0">
+                                <svg className="h-5 w-5 text-primary" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                                </svg>
+                            </div>
+                            <div className="ml-3 flex-1">
+                                <h3 className="text-sm font-semibold text-gray-900 mb-2">🤖 AI Explanation</h3>
+                                <p className="text-sm text-gray-700 whitespace-pre-line leading-relaxed">
+                                    {ragExplanation}
+                                </p>
+                            </div>
+                        </div>
                     </div>
                 )}
             </div>
